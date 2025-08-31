@@ -6,8 +6,117 @@ import seaborn as sns
 from scipy import signal
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d
+import pandas as pd
+import argparse
 import warnings
 warnings.filterwarnings('ignore')
+
+# === CONFIGURATION ===
+# You can easily modify these parameters to analyze different datasets
+DATA_FILE = 'data/2024_xrsa_xrsb.csv'  # Change this to analyze different years
+START_LINE = 0                       # Starting line for data trimming
+END_LINE = 360                        # Ending line for data trimming (500 samples)
+
+# Available data files:
+# - data/2017_xrsa_xrsb.csv (2017 GOES data)
+# - data/2018_xrsa_xrsb.csv (2018 GOES data)
+# - data/2019_xrsa_xrsb.csv (2019 GOES data)
+# - data/2020_xrsa_xrsb.csv (2020 GOES data)
+# - data/2021_xrsa_xrsa.csv (2021 GOES data)
+# - data/2022_xrsa_xrsb.csv (2022 GOES data)
+# - data/2023_xrsa_xrsb.csv (2023 GOES data)
+# - data/2024_xrsa_xrsb.csv (2024 GOES data)
+# - data/2025_xrsa_xrsb.csv (2025 GOES data)
+
+# === DATA LOADING AND BASELINE CORRECTION ===
+
+def load_and_preprocess_data(data_file=DATA_FILE, start_line=START_LINE, end_line=END_LINE):
+    """
+    Load GOES X-ray data and apply baseline correction
+    
+    Parameters:
+    -----------
+    data_file : str
+        Path to the CSV data file
+    start_line : int
+        Starting line for data trimming (default: 2500)
+    end_line : int
+        Ending line for data trimming (default: 3000)
+    
+    Returns:
+    --------
+    tuple : (time_minutes, xrsa_corrected, xrsb_corrected)
+    """
+    print("📁 Loading GOES X-ray data...")
+    
+    try:
+        # Load the data
+        df = pd.read_csv(data_file)
+        print(f"✅ Loaded {len(df)} data points from {data_file}")
+        
+        # Clean missing values
+        df_clean = df.dropna()
+        print(f"✅ Cleaned data: {len(df_clean)} points after removing NaN values")
+        
+        # Trim to specified range
+        df_trimmed = df_clean.iloc[start_line:end_line].copy()
+        print(f"✅ Trimmed to {len(df_trimmed)} points (lines {start_line}-{end_line})")
+        
+        # Extract time and flux data
+        time_minutes = df_trimmed['time_minutes'].values
+        xrsa_flux = df_trimmed['xrsa_flux_observed'].values
+        xrsb_flux = df_trimmed['xrsb_flux_observed'].values
+        
+        # Apply log transformation with small epsilon to avoid log(0)
+        epsilon = 1e-10
+        log_xrsa = np.log10(np.maximum(xrsa_flux, epsilon))
+        log_xrsb = np.log10(np.maximum(xrsb_flux, epsilon))
+        
+        print("✅ Applied log transformation to flux data")
+        
+        # Baseline correction using Asymmetric Least Squares
+        print("🔄 Applying baseline correction...")
+        
+        try:
+            from pybaselines import Baseline
+            baseline_fitter = Baseline(time_minutes)
+            
+            # Apply AsLS baseline correction
+            xrsa_result = baseline_fitter.asls(log_xrsa, lam=1e7, p=0.01)
+            xrsb_result = baseline_fitter.asls(log_xrsb, lam=1e7, p=0.01)
+            
+            xrsa_baseline = xrsa_result[0]
+            xrsb_baseline = xrsb_result[0]
+            
+            xrsa_corrected = log_xrsa - xrsa_baseline
+            xrsb_corrected = log_xrsb - xrsb_baseline
+            
+            print("✅ Baseline correction completed using pybaselines AsLS method")
+            
+        except ImportError:
+            print("⚠️  pybaselines not available, using simple detrending...")
+            # Fallback to simple linear detrending
+            p_xrsa = np.poly1d(np.polyfit(time_minutes, log_xrsa, 1))
+            p_xrsb = np.poly1d(np.polyfit(time_minutes, log_xrsb, 1))
+            
+            xrsa_corrected = log_xrsa - p_xrsa(time_minutes)
+            xrsb_corrected = log_xrsb - p_xrsb(time_minutes)
+            
+            print("✅ Applied linear detrending as fallback")
+        
+        # Print statistics
+        print(f"\n📊 Data Statistics:")
+        print(f"   Time range: {time_minutes[0]:.1f} to {time_minutes[-1]:.1f} minutes")
+        print(f"   Duration: {(time_minutes[-1] - time_minutes[0])/60:.1f} hours")
+        print(f"   XRSA corrected std: {np.std(xrsa_corrected):.6f}")
+        print(f"   XRSB corrected std: {np.std(xrsb_corrected):.6f}")
+        
+        return time_minutes, xrsa_corrected, xrsb_corrected
+        
+    except Exception as e:
+        print(f"❌ Error loading data: {e}")
+        print("Please ensure the data file exists and is accessible")
+        return None, None, None
 
 # === CORRECTED GAUSSIAN FUNCTIONS ===
 
@@ -280,19 +389,49 @@ plt.style.use('default')
 
 # === MAIN ANALYSIS ===
 
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Multi-Gaussian Solar Flare Analysis')
+parser.add_argument('--data', type=str, default=DATA_FILE, 
+                   help=f'Data file path (default: {DATA_FILE})')
+parser.add_argument('--start', type=int, default=START_LINE,
+                   help=f'Starting line for data trimming (default: {START_LINE})')
+parser.add_argument('--end', type=int, default=END_LINE,
+                   help=f'Ending line for data trimming (default: {END_LINE})')
+parser.add_argument('--show-config', action='store_true',
+                   help='Show current configuration and exit')
+
+args = parser.parse_args()
+
+# Show configuration if requested
+if args.show_config:
+    print("🔧 CURRENT CONFIGURATION:")
+    print(f"   Data file: {args.data}")
+    print(f"   Start line: {args.start}")
+    print(f"   End line: {args.end}")
+    print(f"   Sample size: {args.end - args.start}")
+    print("\nAvailable data files:")
+    import os
+    data_dir = 'data'
+    if os.path.exists(data_dir):
+        for file in os.listdir(data_dir):
+            if file.endswith('.csv'):
+                print(f"   - {os.path.join(data_dir, file)}")
+    exit()
+
 print("🔬 ROBUST MULTI-GAUSSIAN PEAK DECOMPOSITION")
 print("=" * 65)
 
-# Check required variables
-required_vars = ['xrsa_corrected', 'xrsb_corrected', 'time_minutes']
-missing_vars = [var for var in required_vars if var not in globals()]
+# Load and preprocess data with command line arguments
+time_minutes, xrsa_corrected, xrsb_corrected = load_and_preprocess_data(
+    data_file=args.data, start_line=args.start, end_line=args.end
+)
 
-if missing_vars:
-    print(f"❌ Missing variables: {missing_vars}")
-    print("Please run the baseline correction analysis first!")
+# Check if data loading was successful
+if time_minutes is None:
+    print("❌ Failed to load data. Exiting analysis.")
     exit()
 
-print("✅ All required variables found. Starting analysis...")
+print("✅ Data loaded and preprocessed successfully. Starting analysis...")
 
 # Initialize results storage
 analysis_results = {}
@@ -595,4 +734,13 @@ print(f"   ✅ Results ready for advanced heating mechanism analysis")
 
 print(f"\n💾 All results stored in 'analysis_results' dictionary")
 print(f"🚀 Analysis complete - ready for nanoflare superposition modeling!")
+print(f"="*70)
+
+# Usage information
+print(f"\n📖 USAGE INFORMATION:")
+print(f"   Basic usage: python final.py")
+print(f"   Custom data file: python final.py --data data/2020_xrsa_xrsb.csv")
+print(f"   Custom range: python final.py --start 1000 --end 1500")
+print(f"   Show config: python final.py --show-config")
+print(f"   Help: python final.py --help")
 print(f"="*70)
